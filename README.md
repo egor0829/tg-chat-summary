@@ -41,10 +41,13 @@ cp .env.example .env
 API_ID=ваш_api_id
 API_HASH=ваш_api_hash
 PHONE=ваш_номер_телефона
+
 # Telegram bot token (получить у @BotFather)
 BOT_TOKEN=токен_вашего_бота
+
 # OpenRouter API key
 OPENROUTER_API_KEY=ваш_ключ_openrouter
+
 # Временная зона для планировщика
 TIMEZONE=Europe/Moscow
 ```
@@ -95,27 +98,6 @@ python -m src.main
 6. Для отписки от чата, используйте команду `/unsubscribe`
 
 ## Техническая информация
-
-### Структура проекта
-
-```
-├── config/              # Конфигурационные файлы
-├── data/                # Директория для базы данных
-├── logs/                # Логи приложения
-├── src/                 # Исходный код
-│   ├── utils/           # Вспомогательные функции
-│   ├── config.py        # Настройки приложения
-│   ├── database.py      # Работа с базой данных
-│   ├── main.py          # Точка входа
-│   ├── models.py        # Модели данных
-│   └── telegram_client.py # Клиент Telegram
-├── .env                 # Переменные окружения (создается пользователем)
-├── .env.example         # Пример файла с переменными окружения
-├── docker-compose.yml   # Конфигурация Docker Compose
-├── Dockerfile           # Инструкции для сборки Docker-образа
-├── README.md            # Документация
-└── requirements.txt     # Зависимости Python
-```
 
 ### Архитектура
 
