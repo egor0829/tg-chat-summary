@@ -1,0 +1,13 @@
+version: '3'
+
+services:
+  tg-summary-bot:
+    build: .
+    container_name: tg-summary-bot
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    env_file:
+      - .env 

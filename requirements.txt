@@ -1,0 +1,10 @@
+telethon==1.28.5
+openrouter==0.5.3
+python-dotenv==1.0.0
+SQLAlchemy==2.0.19
+alembic==1.11.2
+pydantic==2.0.3
+schedule==1.2.0
+loguru==0.7.0
+pytz==2023.3
+aiohttp==3.8.5 
