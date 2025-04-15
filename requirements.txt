@@ -1,5 +1,4 @@
 telethon==1.28.5
-openrouter==0.5.3
 python-dotenv==1.0.0
 SQLAlchemy==2.0.19
 alembic==1.11.2

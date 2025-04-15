@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 from telethon import TelegramClient, events
 from telethon.tl import types
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
@@ -8,7 +9,7 @@ from datetime import datetime, timedelta
 import pytz
 from sqlalchemy.orm import Session
 
-from src.config import API_ID, API_HASH, PHONE, BOT_TOKEN, TIMEZONE
+from src.config import API_ID, API_HASH, PHONE, BOT_TOKEN, TIMEZONE, DATA_DIR
 from src.database import (
     get_or_create_user, 
     subscribe_to_chat, 
@@ -31,38 +32,98 @@ class TelegramSummaryClient:
             db: Сессия базы данных
         """
         self.db = db
-        self.client = TelegramClient('anon', API_ID, API_HASH)
+        
+        # Используем директорию data для хранения файлов сессии
+        session_file = os.path.join(DATA_DIR, 'anon')
+        self.client = TelegramClient(session_file, API_ID, API_HASH)
         self.bot = None  # Клиент бота будет инициализирован позже
         
     async def start(self):
         """Запускает клиент Telegram и настраивает обработчики событий"""
         try:
-            # Запускаем клиент
-            await self.client.start(phone=PHONE)
-            logger.info("Telethon клиент запущен")
+            # Проверяем существование файлов сессии перед запуском
+            session_path = os.path.join(DATA_DIR, 'anon.session')
+            bot_session_path = os.path.join(DATA_DIR, 'bot.session')
+            
+            if not os.path.exists(session_path):
+                logger.error(f"Файл сессии не найден: {session_path}")
+                logger.error("Пожалуйста, запустите скрипт auth_telethon.py на хост-машине перед запуском в Docker")
+                raise FileNotFoundError(f"Файл сессии не найден: {session_path}")
+            
+            # Сначала просто подключаемся, не запрашивая код
+            await self.client.connect()
+            
+            # Проверяем авторизацию
+            if not await self.client.is_user_authorized():
+                logger.error("Сессия существует, но пользователь не авторизован")
+                logger.error("Пожалуйста, выполните повторную аутентификацию, запустив скрипт auth_telethon.py")
+                await self.client.disconnect()
+                raise RuntimeError("Пользователь не авторизован")
+                
+            logger.info("Telethon клиент успешно подключен с существующей сессией")
             
             # Запускаем бота, если задан токен
             if BOT_TOKEN:
-                self.bot = TelegramClient('bot', API_ID, API_HASH)
-                await self.bot.start(bot_token=BOT_TOKEN)
-                logger.info("Telegram бот запущен")
+                if not os.path.exists(bot_session_path):
+                    logger.error(f"Файл сессии бота не найден: {bot_session_path}")
+                    logger.error("Пожалуйста, запустите скрипт auth_bot.py на хост-машине перед запуском в Docker")
+                    raise FileNotFoundError(f"Файл сессии бота не найден: {bot_session_path}")
+                
+                # Инициализируем бота с использованием существующей сессии
+                bot_session_file = os.path.join(DATA_DIR, 'bot')
+                self.bot = TelegramClient(bot_session_file, API_ID, API_HASH)
+                
+                # Просто подключаемся
+                await self.bot.connect()
+                
+                # Проверяем авторизацию бота
+                if not await self.bot.is_user_authorized():
+                    logger.error("Сессия бота существует, но бот не авторизован")
+                    logger.error("Пожалуйста, выполните повторную аутентификацию, запустив скрипт auth_bot.py")
+                    await self.bot.disconnect()
+                    raise RuntimeError("Бот не авторизован")
+                
+                logger.info("Telegram бот успешно подключен с существующей сессией")
                 
                 # Регистрируем обработчики сообщений бота
                 self._register_bot_handlers()
             else:
                 logger.warning("BOT_TOKEN не задан, бот не будет запущен")
                 
+        except FloodWaitError as e:
+            # Обработка ошибки FloodWait
+            wait_time = e.seconds
+            logger.warning(f"Telegram требует подождать {wait_time} секунд. Ожидаем...")
+            
+            # Закрываем соединение перед ожиданием
+            if hasattr(self, 'client') and self.client.is_connected():
+                await self.client.disconnect()
+            if hasattr(self, 'bot') and self.bot and self.bot.is_connected():
+                await self.bot.disconnect()
+                
+            # Ждем указанное время + 5 секунд для надежности
+            await asyncio.sleep(wait_time + 5)
+            
+            # Повторно пытаемся запустить после ожидания
+            logger.info(f"Ожидание {wait_time} секунд завершено, повторное подключение...")
+            await self.start()
+                
         except Exception as e:
             logger.error(f"Ошибка при запуске Telegram клиента: {str(e)}")
+            # Закрываем соединения при ошибке
+            if hasattr(self, 'client') and self.client.is_connected():
+                await self.client.disconnect()
+            if hasattr(self, 'bot') and self.bot and self.bot.is_connected():
+                await self.bot.disconnect()
             raise
             
     async def stop(self):
         """Останавливает клиент Telegram"""
-        if self.client:
+        if self.client and self.client.is_connected():
             await self.client.disconnect()
             logger.info("Telethon клиент остановлен")
             
-        if self.bot:
+        if self.bot and self.bot.is_connected():
             await self.bot.disconnect()
             logger.info("Telegram бот остановлен")
             
@@ -298,36 +359,117 @@ class TelegramSummaryClient:
             # Получаем информацию о чате из пересланного сообщения
             msg = event.message
             
-            # Проверяем, есть ли информация о пересылке
-            if not msg.forward or not msg.forward.chat:
-                await event.respond("❌ Не могу определить чат из этого сообщения. Пожалуйста, перешлите сообщение из нужного чата.")
-                return
-                
-            forward_info = msg.forward
-            chat_id = forward_info.chat.id
-            chat_title = forward_info.chat.title if hasattr(forward_info.chat, 'title') else str(chat_id)
+            # Логируем структуру объекта для диагностики
+            logger.info(f"Получено пересланное сообщение: {msg}")
+            logger.info(f"Атрибуты объекта forward: {dir(msg.forward)}")
             
-            # Проверяем, есть ли у клиента доступ к чату
             try:
-                chat_entity = await self.client.get_entity(chat_id)
+                forward_info = msg.forward
                 
-                # Подписываем пользователя на чат
-                subscription = subscribe_to_chat(self.db, user.id, chat_id, chat_title)
+                # Проверяем доступные атрибуты для извлечения информации о чате
+                from_id = None
+                chat_id = None
+                chat_title = None
                 
-                await event.respond(
-                    f"✅ Вы успешно подписались на саммари чата **{chat_title}**\n\n"
-                    f"Вы будете получать саммари согласно вашим настройкам.",
-                    parse_mode='md'
-                )
+                # Пробуем извлечь ID чата из разных возможных атрибутов
+                if hasattr(forward_info, 'chat') and forward_info.chat:
+                    logger.info(f"Найден атрибут chat: {forward_info.chat}")
+                    if hasattr(forward_info.chat, 'id'):
+                        chat_id = forward_info.chat.id
+                    if hasattr(forward_info.chat, 'title'):
+                        chat_title = forward_info.chat.title
+                
+                # Проверяем атрибуты для случая пересылки из канала или группы
+                if hasattr(forward_info, 'channel_id'):
+                    logger.info(f"Найден атрибут channel_id: {forward_info.channel_id}")
+                    chat_id = forward_info.channel_id
+                
+                # Проверяем атрибуты для случая пересылки от пользователя
+                if hasattr(forward_info, 'from_id'):
+                    logger.info(f"Найден атрибут from_id: {forward_info.from_id}")
+                    from_id = forward_info.from_id
+                    # Если есть from_id, но нет chat_id, это может быть пересылка из приватного чата
+                    if not chat_id and hasattr(from_id, 'channel_id'):
+                        chat_id = from_id.channel_id
+                
+                # Проверяем, есть ли у сообщения другие атрибуты, которые могут содержать ID чата
+                if not chat_id and hasattr(msg, 'peer_id'):
+                    logger.info(f"Найден атрибут peer_id: {msg.peer_id}")
+                    if hasattr(msg.peer_id, 'channel_id'):
+                        chat_id = msg.peer_id.channel_id
+                        
+                # Получаем имя чата, если оно не было найдено
+                if not chat_title and hasattr(forward_info, 'chat_name'):
+                    chat_title = forward_info.chat_name
+                elif not chat_title and hasattr(forward_info, 'channel_post') and forward_info.channel_post:
+                    # Для постов из каналов
+                    chat_title = f"Канал (ID: {chat_id})"
+                
+                # Если не удалось извлечь ID чата ни из одного атрибута
+                if not chat_id:
+                    logger.error(f"Не удалось определить ID чата из пересланного сообщения: {msg}")
+                    await event.respond(
+                        "❌ Не могу определить чат из этого сообщения.\n\n"
+                        "Это может происходить из-за ограничений приватности канала или чата.\n\n"
+                        "Попробуйте:\n"
+                        "1. Переслать сообщение из публичного канала или группы\n"
+                        "2. Убедиться, что основной аккаунт является участником чата\n"
+                        "3. Переслать сообщение от имени администратора канала или группы"
+                    )
+                    return
+                
+                # Если не удалось извлечь название чата, используем ID
+                if not chat_title:
+                    chat_title = f"Чат {chat_id}"
+                
+                logger.info(f"Определен чат: ID={chat_id}, Title={chat_title}")
+                
+                # Пытаемся получить сущность чата через главный клиент
+                try:
+                    # Загружаем сущность чата
+                    chat_entity = await self.client.get_entity(chat_id)
+                    logger.info(f"Успешно получена сущность чата {chat_id}")
+                    
+                    # Если получилось получить сущность, обновляем название из неё
+                    if hasattr(chat_entity, 'title') and chat_entity.title:
+                        chat_title = chat_entity.title
+                    
+                    # Подписываем пользователя на чат
+                    subscription = subscribe_to_chat(self.db, user.id, chat_id, chat_title)
+                    
+                    await event.respond(
+                        f"✅ Вы успешно подписались на саммари чата **{chat_title}**\n\n"
+                        f"Вы будете получать саммари согласно вашим настройкам.",
+                        parse_mode='md'
+                    )
+                    
+                except Exception as e:
+                    chat_error = str(e)
+                    logger.error(f"Ошибка при получении сущности чата {chat_id}: {chat_error}")
+                    
+                    # Отображаем понятное сообщение об ошибке
+                    if "Cannot get entity from a channel" in chat_error or "Could not find the input entity" in chat_error:
+                        await event.respond(
+                            f"❌ Не удалось подписаться на чат **{chat_title}**.\n\n"
+                            f"Для корректной работы саммари основной клиент должен быть участником чата. "
+                            f"Пожалуйста, добавьте аккаунт {PHONE} в чат как участника, а затем повторите попытку.\n\n"
+                            f"Технические детали ошибки: {chat_error}",
+                            parse_mode='md'
+                        )
+                    else:
+                        await event.respond(
+                            f"❌ Не удалось подписаться на чат **{chat_title}**.\n\n"
+                            f"Причина: {chat_error}\n\n"
+                            f"Пожалуйста, убедитесь, что аккаунт {PHONE} является участником чата.",
+                            parse_mode='md'
+                        )
                 
             except Exception as e:
-                logger.error(f"Ошибка при подписке на чат {chat_id}: {str(e)}")
+                logger.error(f"Ошибка при обработке пересланного сообщения: {str(e)}")
                 await event.respond(
-                    "❌ Не удалось подписаться на чат. Возможные причины:\n"
-                    "• Бот не имеет доступа к этому чату\n"
-                    "• Чат больше не существует\n"
-                    "• Произошла техническая ошибка\n\n"
-                    "Убедитесь, что бот является участником чата."
+                    "❌ Произошла ошибка при обработке пересланного сообщения.\n\n"
+                    f"Ошибка: {str(e)}\n\n"
+                    "Попробуйте переслать другое сообщение из того же чата или обратитесь к администратору бота."
                 )
         
         # Обработчик команды /summary для ручного запроса саммари
