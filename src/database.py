@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import Session
 from datetime import datetime
 
-from src.config import DATABASE_URL
+from src.config import DATABASE_URL, DEFAULT_OPENROUTER_MODEL
 from src.models import User, UserSettings, ChatSubscription, Summary, Base
 from src.utils.logger import logger
 
@@ -141,7 +141,8 @@ def unsubscribe_from_chat(db: Session, user_id: int, chat_id: int) -> bool:
 
 
 def update_user_settings(db: Session, user_id: int, delivery_time: str = None, 
-                         delivery_frequency: str = None, timezone: str = None) -> UserSettings:
+                         delivery_frequency: str = None, timezone: str = None,
+                         openrouter_model: str = None) -> UserSettings:
     """
     Обновляет настройки пользователя
     
@@ -151,6 +152,7 @@ def update_user_settings(db: Session, user_id: int, delivery_time: str = None,
         delivery_time: Время доставки (формат HH:MM)
         delivery_frequency: Частота доставки (daily, weekly)
         timezone: Временная зона
+        openrouter_model: Модель OpenRouter
         
     Returns:
         UserSettings: Обновленные настройки пользователя
@@ -158,7 +160,10 @@ def update_user_settings(db: Session, user_id: int, delivery_time: str = None,
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     
     if not settings:
-        settings = UserSettings(user_id=user_id)
+        settings = UserSettings(
+            user_id=user_id,
+            openrouter_model=DEFAULT_OPENROUTER_MODEL
+        )
         db.add(settings)
         
     if delivery_time:
@@ -170,13 +175,36 @@ def update_user_settings(db: Session, user_id: int, delivery_time: str = None,
     if timezone:
         settings.timezone = timezone
         
+    if openrouter_model:
+        settings.openrouter_model = openrouter_model
+        
     db.commit()
     db.refresh(settings)
     return settings
 
 
+def get_user_model(db: Session, user_id: int) -> str:
+    """
+    Получает выбранную пользователем модель
+    
+    Args:
+        db: Сессия базы данных
+        user_id: ID пользователя
+        
+    Returns:
+        str: Название модели
+    """
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
+    
+    if not settings or not settings.openrouter_model:
+        return DEFAULT_OPENROUTER_MODEL
+        
+    return settings.openrouter_model
+
+
 def save_summary(db: Session, subscription_id: int, content: str, 
-                from_message_id: int = None, to_message_id: int = None) -> Summary:
+                from_message_id: int = None, to_message_id: int = None,
+                model_used: str = None) -> Summary:
     """
     Сохраняет саммари в базу данных
     
@@ -186,6 +214,7 @@ def save_summary(db: Session, subscription_id: int, content: str,
         content: Текст саммари
         from_message_id: ID начального сообщения
         to_message_id: ID конечного сообщения
+        model_used: Использованная модель
         
     Returns:
         Summary: Созданный объект саммари
@@ -195,7 +224,8 @@ def save_summary(db: Session, subscription_id: int, content: str,
         content=content,
         from_message_id=from_message_id,
         to_message_id=to_message_id,
-        created_at=datetime.utcnow()
+        created_at=datetime.utcnow(),
+        model_used=model_used
     )
     
     db.add(summary)

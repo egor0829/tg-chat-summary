@@ -3,7 +3,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 import datetime
 from typing import List, Optional
-from src.config import DATABASE_URL
+from src.config import DATABASE_URL, DEFAULT_OPENROUTER_MODEL
 
 Base = declarative_base()
 
@@ -58,6 +58,7 @@ class UserSettings(Base):
     delivery_frequency = Column(String, default="daily")  # daily, weekly
     timezone = Column(String, default="UTC")
     is_active = Column(Boolean, default=True)
+    openrouter_model = Column(String, default=DEFAULT_OPENROUTER_MODEL)  # Модель OpenRouter
     user = relationship("User", back_populates="settings")
 
 
@@ -71,6 +72,7 @@ class Summary(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     from_message_id = Column(Integer, nullable=True)
     to_message_id = Column(Integer, nullable=True)
+    model_used = Column(String, nullable=True)  # Какая модель использовалась
     subscription = relationship("ChatSubscription", back_populates="summaries")
 
 

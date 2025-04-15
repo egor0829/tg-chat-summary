@@ -19,7 +19,21 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Настройки OpenRouter
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = "meta-llama/llama-3-70b-instruct"  # Можно настроить другую модель
+DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3-70b-instruct"  # Модель по умолчанию
+
+# Список доступных моделей OpenRouter
+AVAILABLE_MODELS = {
+    "meta-llama/llama-3-70b-instruct": "Llama 3 70B (рекомендуется)",
+    "meta-llama/llama-3-8b-instruct": "Llama 3 8B (быстрее)",
+    "anthropic/claude-3-opus-20240229": "Claude 3 Opus (высокое качество)",
+    "anthropic/claude-3-sonnet-20240229": "Claude 3 Sonnet (баланс)",
+    "anthropic/claude-3-haiku-20240307": "Claude 3 Haiku (быстрее)",
+    "google/gemini-1.5-pro-latest": "Gemini 1.5 Pro",
+    "mistralai/mixtral-8x7b-instruct": "Mixtral 8x7B",
+    "mistralai/mistral-7b-instruct": "Mistral 7B (быстрее)",
+    "openai/gpt-4o": "GPT-4o",
+    "openai/gpt-3.5-turbo": "GPT-3.5 Turbo (быстрее)",
+}
 
 # Настройки для БД
 DATABASE_URL = f"sqlite:///{DATA_DIR}/tg_summary.db"

@@ -1,20 +1,25 @@
 import aiohttp
 import json
-from src.config import OPENROUTER_API_KEY, OPENROUTER_MODEL
+from src.config import OPENROUTER_API_KEY, DEFAULT_OPENROUTER_MODEL, AVAILABLE_MODELS
 from src.utils.logger import logger
 
-async def generate_summary(messages_text: str) -> str:
+async def generate_summary(messages_text: str, model_name: str = None) -> str:
     """
     Генерирует саммари сообщений с помощью OpenRouter API
     
     Args:
         messages_text: Текст сообщений для саммаризации
+        model_name: Название модели для использования (по умолчанию берется DEFAULT_OPENROUTER_MODEL)
         
     Returns:
         str: Сгенерированное саммари
     """
     if not messages_text.strip():
         return "Нет сообщений для саммаризации."
+    
+    # Используем указанную модель или модель по умолчанию
+    model = model_name if model_name and model_name in AVAILABLE_MODELS else DEFAULT_OPENROUTER_MODEL
+    logger.info(f"Используется модель для саммаризации: {model}")
     
     prompt = f"""Пожалуйста, создай краткое саммари следующих сообщений из телеграм-чата. 
 Структурируй саммари по таким разделам:
@@ -36,7 +41,7 @@ async def generate_summary(messages_text: str) -> str:
         }
         
         payload = {
-            "model": OPENROUTER_MODEL,
+            "model": model,
             "messages": [
                 {
                     "role": "system", 
@@ -68,4 +73,26 @@ async def generate_summary(messages_text: str) -> str:
                 
     except Exception as e:
         logger.error(f"Ошибка при генерации саммари: {str(e)}")
-        return f"Не удалось сгенерировать саммари: {str(e)}" 
+        return f"Не удалось сгенерировать саммари: {str(e)}"
+
+
+async def list_available_models():
+    """
+    Возвращает список доступных моделей с их описанием
+    
+    Returns:
+        str: Форматированный список моделей
+    """
+    models_list = "\n".join([f"• <code>{model_id}</code> - {description}" for model_id, description in AVAILABLE_MODELS.items()])
+    
+    return f"""📋 <b>Доступные модели для саммаризации:</b>
+
+{models_list}
+
+Текущая модель по умолчанию: <code>{DEFAULT_OPENROUTER_MODEL}</code>
+
+Для выбора модели используйте команду:
+/model [id_модели]
+
+Например: <code>/model anthropic/claude-3-haiku-20240307</code>
+""" 

@@ -9,18 +9,19 @@ from datetime import datetime, timedelta
 import pytz
 from sqlalchemy.orm import Session
 
-from src.config import API_ID, API_HASH, PHONE, BOT_TOKEN, TIMEZONE, DATA_DIR
+from src.config import API_ID, API_HASH, PHONE, BOT_TOKEN, TIMEZONE, DATA_DIR, AVAILABLE_MODELS
 from src.database import (
     get_or_create_user, 
     subscribe_to_chat, 
     unsubscribe_from_chat, 
     update_user_settings, 
     save_summary, 
-    update_last_processed_message
+    update_last_processed_message,
+    get_user_model
 )
 from src.models import User, ChatSubscription
 from src.utils.logger import logger
-from src.utils.openrouter import generate_summary
+from src.utils.openrouter import generate_summary, list_available_models
 
 
 class TelegramSummaryClient:
@@ -184,15 +185,23 @@ class TelegramSummaryClient:
             
             settings = user.settings
             
+            # Получаем название модели из списка доступных
+            model_name = settings.openrouter_model
+            model_display_name = AVAILABLE_MODELS.get(model_name, model_name)
+            
             await event.respond(
                 "⚙️ **Настройки**\n\n"
                 f"Текущее время доставки саммари: {settings.delivery_time}\n"
                 f"Частота: {settings.delivery_frequency}\n"
                 f"Временная зона: {settings.timezone}\n\n"
+                f"Модель для саммаризации: {model_display_name}\n\n"
                 "Чтобы изменить время доставки, отправь сообщение в формате:\n"
                 "`/time ЧЧ:ММ`\n\n"
                 "Чтобы изменить частоту, отправь:\n"
-                "`/frequency daily` или `/frequency weekly`",
+                "`/frequency daily` или `/frequency weekly`\n\n"
+                "Для выбора модели саммаризации используй:\n"
+                "`/models` - список доступных моделей\n"
+                "`/model ID_модели` - выбор конкретной модели",
                 parse_mode='md'
             )
         
@@ -370,40 +379,60 @@ class TelegramSummaryClient:
                 from_id = None
                 chat_id = None
                 chat_title = None
+                is_private_chat = False
+                user_id = None
                 
-                # Пробуем извлечь ID чата из разных возможных атрибутов
-                if hasattr(forward_info, 'chat') and forward_info.chat:
-                    logger.info(f"Найден атрибут chat: {forward_info.chat}")
-                    if hasattr(forward_info.chat, 'id'):
-                        chat_id = forward_info.chat.id
-                    if hasattr(forward_info.chat, 'title'):
-                        chat_title = forward_info.chat.title
-                
-                # Проверяем атрибуты для случая пересылки из канала или группы
-                if hasattr(forward_info, 'channel_id'):
-                    logger.info(f"Найден атрибут channel_id: {forward_info.channel_id}")
-                    chat_id = forward_info.channel_id
-                
-                # Проверяем атрибуты для случая пересылки от пользователя
+                # Проверяем, есть ли информация об отправителе (для приватных чатов)
                 if hasattr(forward_info, 'from_id'):
                     logger.info(f"Найден атрибут from_id: {forward_info.from_id}")
                     from_id = forward_info.from_id
+                    
+                    # Проверяем, является ли from_id PeerUser (приватный чат)
+                    if hasattr(from_id, 'user_id'):
+                        user_id = from_id.user_id
+                        logger.info(f"Обнаружен приватный чат с пользователем ID: {user_id}")
+                        is_private_chat = True
+                        # Для приватных чатов используем user_id в качестве chat_id с префиксом "user_"
+                        chat_id = f"user_{user_id}"
                     # Если есть from_id, но нет chat_id, это может быть пересылка из приватного чата
-                    if not chat_id and hasattr(from_id, 'channel_id'):
+                    elif not chat_id and hasattr(from_id, 'channel_id'):
                         chat_id = from_id.channel_id
                 
-                # Проверяем, есть ли у сообщения другие атрибуты, которые могут содержать ID чата
-                if not chat_id and hasattr(msg, 'peer_id'):
-                    logger.info(f"Найден атрибут peer_id: {msg.peer_id}")
-                    if hasattr(msg.peer_id, 'channel_id'):
-                        chat_id = msg.peer_id.channel_id
-                        
-                # Получаем имя чата, если оно не было найдено
-                if not chat_title and hasattr(forward_info, 'chat_name'):
-                    chat_title = forward_info.chat_name
-                elif not chat_title and hasattr(forward_info, 'channel_post') and forward_info.channel_post:
-                    # Для постов из каналов
-                    chat_title = f"Канал (ID: {chat_id})"
+                # Проверяем наличие имени отправителя (для приватных чатов без явного ID)
+                if hasattr(forward_info, 'from_name') and forward_info.from_name and not user_id:
+                    logger.info(f"Найден атрибут from_name: {forward_info.from_name}")
+                    chat_title = forward_info.from_name
+                    is_private_chat = True
+                    # Создаем псевдо-ID на основе имени (не идеально, но работает для демонстрации)
+                    # В реальном сценарии лучше попытаться найти пользователя по имени через API
+                    chat_id = f"name_{hash(forward_info.from_name) % 10000000}"
+                
+                # Пробуем извлечь ID чата из разных возможных атрибутов (для групп и каналов)
+                if not is_private_chat:
+                    if hasattr(forward_info, 'chat') and forward_info.chat:
+                        logger.info(f"Найден атрибут chat: {forward_info.chat}")
+                        if hasattr(forward_info.chat, 'id'):
+                            chat_id = forward_info.chat.id
+                        if hasattr(forward_info.chat, 'title'):
+                            chat_title = forward_info.chat.title
+                    
+                    # Проверяем атрибуты для случая пересылки из канала или группы
+                    if hasattr(forward_info, 'channel_id'):
+                        logger.info(f"Найден атрибут channel_id: {forward_info.channel_id}")
+                        chat_id = forward_info.channel_id
+                    
+                    # Проверяем, есть ли у сообщения другие атрибуты, которые могут содержать ID чата
+                    if not chat_id and hasattr(msg, 'peer_id'):
+                        logger.info(f"Найден атрибут peer_id: {msg.peer_id}")
+                        if hasattr(msg.peer_id, 'channel_id'):
+                            chat_id = msg.peer_id.channel_id
+                            
+                    # Получаем имя чата, если оно не было найдено
+                    if not chat_title and hasattr(forward_info, 'chat_name'):
+                        chat_title = forward_info.chat_name
+                    elif not chat_title and hasattr(forward_info, 'channel_post') and forward_info.channel_post:
+                        # Для постов из каналов
+                        chat_title = f"Канал (ID: {chat_id})"
                 
                 # Если не удалось извлечь ID чата ни из одного атрибута
                 if not chat_id:
@@ -420,10 +449,49 @@ class TelegramSummaryClient:
                 
                 # Если не удалось извлечь название чата, используем ID
                 if not chat_title:
-                    chat_title = f"Чат {chat_id}"
+                    if is_private_chat and user_id:
+                        chat_title = f"Личный чат с пользователем {user_id}"
+                    else:
+                        chat_title = f"Чат {chat_id}"
                 
-                logger.info(f"Определен чат: ID={chat_id}, Title={chat_title}")
+                logger.info(f"Определен чат: ID={chat_id}, Title={chat_title}, IsPrivate={is_private_chat}")
                 
+                # Для приватных чатов используем специальную логику
+                if is_private_chat:
+                    try:
+                        if user_id:
+                            # Получаем сущность пользователя
+                            user_entity = await self.client.get_entity(user_id)
+                            logger.info(f"Успешно получена сущность пользователя {user_id}")
+                            
+                            # Формируем имя пользователя для отображения
+                            full_name = getattr(user_entity, 'first_name', '')
+                            if hasattr(user_entity, 'last_name') and user_entity.last_name:
+                                full_name += f" {user_entity.last_name}"
+                            
+                            chat_title = f"Личный чат с {full_name}"
+                        
+                        # Подписываем пользователя на личный чат
+                        subscription = subscribe_to_chat(self.db, user.id, chat_id, chat_title)
+                        
+                        await event.respond(
+                            f"✅ Вы успешно подписались на саммари личного чата **{chat_title}**\n\n"
+                            f"Вы будете получать саммари согласно вашим настройкам.",
+                            parse_mode='md'
+                        )
+                        return
+                        
+                    except Exception as e:
+                        chat_error = str(e)
+                        logger.error(f"Ошибка при обработке приватного чата: {chat_error}")
+                        await event.respond(
+                            f"❌ Не удалось подписаться на личный чат **{chat_title}**.\n\n"
+                            f"Ошибка: {chat_error}",
+                            parse_mode='md'
+                        )
+                        return
+                
+                # Для групп и каналов - стандартная логика
                 # Пытаемся получить сущность чата через главный клиент
                 try:
                     # Загружаем сущность чата
@@ -500,8 +568,57 @@ class TelegramSummaryClient:
             except Exception as e:
                 logger.error(f"Ошибка при генерации саммари: {str(e)}")
                 await event.respond(f"❌ Произошла ошибка при генерации саммари: {str(e)}")
+        
+        # Обработчик команды /models
+        @self.bot.on(events.NewMessage(pattern='/models'))
+        async def models_handler(event):
+            """Обрабатывает команду /models для отображения списка доступных моделей"""
+            # Получаем список моделей
+            models_list = await list_available_models()
             
+            # Отправляем список моделей
+            await event.respond(models_list, parse_mode='html')
             
+        # Обработчик команды /model
+        @self.bot.on(events.NewMessage(pattern=r'/model\s+(.+)'))
+        async def model_handler(event):
+            """Обрабатывает команду /model для установки модели для саммаризации"""
+            sender = await event.get_sender()
+            user = get_or_create_user(
+                self.db, 
+                sender.id, 
+                sender.first_name,
+                getattr(sender, 'last_name', None),
+                getattr(sender, 'username', None)
+            )
+            
+            # Извлекаем название модели из сообщения
+            model_id = event.pattern_match.group(1).strip()
+            
+            # Проверяем, что модель существует в списке доступных
+            if model_id in AVAILABLE_MODELS:
+                # Обновляем настройки пользователя
+                update_user_settings(self.db, user.id, openrouter_model=model_id)
+                model_display_name = AVAILABLE_MODELS[model_id]
+                
+                await event.respond(
+                    f"✅ Модель для саммаризации успешно изменена на:\n"
+                    f"<b>{model_display_name}</b>\n\n"
+                    f"<code>{model_id}</code>",
+                    parse_mode='html'
+                )
+            else:
+                # Если модель не найдена, показываем список доступных
+                await event.respond(
+                    f"❌ Модель <code>{model_id}</code> не найдена в списке доступных.\n\n"
+                    f"Пожалуйста, выберите модель из следующего списка:",
+                    parse_mode='html'
+                )
+                
+                # Получаем и отправляем список моделей
+                models_list = await list_available_models()
+                await event.respond(models_list, parse_mode='html')
+
 async def generate_and_send_summaries(client, db: Session, user: User, bot=None, chat_id=None):
     """
     Генерирует и отправляет саммари для всех чатов пользователя
@@ -521,36 +638,100 @@ async def generate_and_send_summaries(client, db: Session, user: User, bot=None,
         if bot and chat_id:
             await bot.send_message(chat_id, "У вас нет активных подписок на чаты.")
         return
+    
+    # Получаем выбранную пользователем модель
+    user_model = get_user_model(db, user.id)
+    logger.info(f"Пользователь {user.telegram_id} использует модель: {user_model}")
         
     # Генерируем саммари для каждой подписки
     for subscription in subscriptions:
         try:
-            # Получаем сообщения из чата с момента последнего обработанного сообщения
-            chat_entity = await client.get_entity(subscription.chat_id)
+            # Проверяем, является ли это приватным чатом
+            is_private_chat = str(subscription.chat_id).startswith('user_') or str(subscription.chat_id).startswith('name_')
             
-            # Определяем начальное сообщение
-            last_processed_id = subscription.last_processed_message_id
-            
-            # Если нет последнего обработанного сообщения, берем сообщения за последние 24 часа
-            if not last_processed_id:
-                # Получаем сообщения за последние 24 часа
-                yesterday = datetime.now(TIMEZONE) - timedelta(days=1)
-                messages = await client.get_messages(
-                    chat_entity,
-                    limit=100,  # Ограничиваем количество сообщений
-                    offset_date=yesterday
-                )
+            if is_private_chat:
+                # Обработка приватного чата
+                logger.info(f"Обрабатываем приватный чат: {subscription.chat_title}")
+                
+                # Для чатов с user_id
+                if str(subscription.chat_id).startswith('user_'):
+                    user_id = int(str(subscription.chat_id).replace('user_', ''))
+                    logger.info(f"Извлечен user_id: {user_id}")
+                    
+                    # Получаем сущность пользователя
+                    try:
+                        chat_entity = await client.get_entity(user_id)
+                    except Exception as e:
+                        logger.error(f"Не удалось получить сущность пользователя {user_id}: {str(e)}")
+                        if bot and chat_id:
+                            await bot.send_message(
+                                chat_id,
+                                f"❌ Не удалось получить доступ к чату {subscription.chat_title}: {str(e)}"
+                            )
+                        continue
+                else:
+                    # Для чатов с именем без user_id
+                    logger.warning(f"Чат идентифицирован только по имени: {subscription.chat_title}")
+                    if bot and chat_id:
+                        await bot.send_message(
+                            chat_id,
+                            f"⚠️ Чат {subscription.chat_title} идентифицирован только по имени. "
+                            f"Для корректной работы переслите новое сообщение из этого чата."
+                        )
+                    continue
+                
+                # Определяем начальное сообщение
+                last_processed_id = subscription.last_processed_message_id
+                
+                # Для приватных чатов получаем диалог с пользователем
+                # Если нет последнего обработанного сообщения, берем сообщения за последние 24 часа
+                if not last_processed_id:
+                    # Получаем сообщения за последние 24 часа
+                    yesterday = datetime.now(TIMEZONE) - timedelta(days=1)
+                    messages = await client.get_messages(
+                        chat_entity,  # Используем entity пользователя
+                        limit=100,    # Ограничиваем количество сообщений
+                        offset_date=yesterday
+                    )
+                else:
+                    # Получаем сообщения с момента последнего обработанного
+                    messages = await client.get_messages(
+                        chat_entity,  # Используем entity пользователя
+                        limit=100,
+                        min_id=last_processed_id
+                    )
             else:
-                # Получаем сообщения с момента последнего обработанного
-                messages = await client.get_messages(
-                    chat_entity,
-                    limit=100,
-                    min_id=last_processed_id
-                )
+                # Обработка групп и каналов (стандартная логика)
+                chat_entity = await client.get_entity(subscription.chat_id)
+                
+                # Определяем начальное сообщение
+                last_processed_id = subscription.last_processed_message_id
+                
+                # Если нет последнего обработанного сообщения, берем сообщения за последние 24 часа
+                if not last_processed_id:
+                    # Получаем сообщения за последние 24 часа
+                    yesterday = datetime.now(TIMEZONE) - timedelta(days=1)
+                    messages = await client.get_messages(
+                        chat_entity,
+                        limit=100,  # Ограничиваем количество сообщений
+                        offset_date=yesterday
+                    )
+                else:
+                    # Получаем сообщения с момента последнего обработанного
+                    messages = await client.get_messages(
+                        chat_entity,
+                        limit=100,
+                        min_id=last_processed_id
+                    )
             
             # Проверяем, есть ли новые сообщения
             if not messages:
                 logger.info(f"Нет новых сообщений в чате {subscription.chat_title}")
+                if bot and chat_id:
+                    await bot.send_message(
+                        chat_id,
+                        f"Нет новых сообщений в чате {subscription.chat_title} с момента последнего саммари."
+                    )
                 continue
                 
             # Сортируем сообщения по ID
@@ -567,8 +748,8 @@ async def generate_and_send_summaries(client, db: Session, user: User, bot=None,
                     timestamp = msg.date.astimezone(TIMEZONE).strftime("%d.%m %H:%M")
                     messages_text += f"[{timestamp}] {sender_name}: {msg.message}\n\n"
             
-            # Генерируем саммари
-            summary_text = await generate_summary(messages_text)
+            # Генерируем саммари с использованием выбранной модели
+            summary_text = await generate_summary(messages_text, user_model)
             
             # Записываем саммари в базу данных
             summary = save_summary(
@@ -576,7 +757,8 @@ async def generate_and_send_summaries(client, db: Session, user: User, bot=None,
                 subscription.id, 
                 summary_text,
                 messages[0].id if messages else None,
-                messages[-1].id if messages else None
+                messages[-1].id if messages else None,
+                model_used=user_model
             )
             
             # Обновляем последнее обработанное сообщение
@@ -585,10 +767,13 @@ async def generate_and_send_summaries(client, db: Session, user: User, bot=None,
             
             # Отправляем саммари пользователю
             if bot and chat_id:
+                model_display_name = AVAILABLE_MODELS.get(user_model, user_model)
                 await bot.send_message(
                     chat_id,
-                    f"📝 **Саммари чата {subscription.chat_title}:**\n\n{summary_text}",
-                    parse_mode='md'
+                    f"📝 <b>Саммари чата {subscription.chat_title}</b>\n"
+                    f"<i>Модель: {model_display_name}</i>\n\n"
+                    f"{summary_text}",
+                    parse_mode='html'
                 )
                 
         except Exception as e:
